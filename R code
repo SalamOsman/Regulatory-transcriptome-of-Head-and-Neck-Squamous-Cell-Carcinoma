@@ -1,0 +1,178 @@
+#Loading the required libraries
+library(GDCRNATools)
+library(DT)
+library(EnhancedVolcano)
+library(pathview)
+library(DESeq2)
+library(ggfortify)
+
+#Setting-up a path for downloading head and neck squamous cell carcinoma in The Cancer Genome Atlas (TCGA-HNSC).
+project <- 'TCGA-HNSC'
+rnadir <- paste(project, 'RNAseq', sep='/')
+mirdir <- paste(project, 'miRNAs', sep='/')
+clinicaldir <- paste(project, 'Clinical', sep='/')
+
+#Downloading mRNA samples from TCGA-HNSC dataset
+gdcRNADownload(project.id = 'TCGA-HNSC', data.type = 'RNAseq', 
+               write.manifest = FALSE, method = 'gdc-client',
+               directory = rnadir)
+
+#Downloading miRNA samlpes from TCGA-HNSC dataset
+gdcRNADownload(project.id = 'TCGA-HNSC', data.type = 'miRNAs', 
+               write.manifest = FALSE, method = 'gdc-client',
+               directory = mirdir)
+
+#Downloading Clinical data for TCGA-HNSC dataset
+gdcClinicalDownload(project.id = 'TCGA-HNSC', write.manifest = FALSE,
+                    method = 'gdc-client', directory = clinicaldir)
+
+#Parsing RNAseq metadata
+metaMatrix.RNA <- gdcParseMetadata(project.id = 'TCGA-HNSC',
+                                   data.type = 'RNAseq', 
+                                   write.meta = FALSE)
+
+#Filtering duplicated samples in miRNAs metadata 
+metaMatrix.RNA <- gdcFilterDuplicate(metaMatrix.RNA)
+#Filtering non-Primary Tumor and non-Solid Tissue Normal samples in miRNAs metadata
+metaMatrix.RNA <- gdcFilterSampleType(metaMatrix.RNA)
+
+#Parse miRNAs metadata
+metaMatrix.MIR <- gdcParseMetadata(project.id = 'TCGA-HNSC',
+                                   data.type = 'miRNAs', 
+                                   write.meta = FALSE)
+#Filtering duplicated samples in miRNAs metadata 
+metaMatrix.MIR <- gdcFilterDuplicate(metaMatrix.MIR)
+#Filtering non-Primary Tumor and non-Solid Tissue Normal samples in miRNAs metadata
+metaMatrix.MIR <- gdcFilterSampleType(metaMatrix.MIR)
+
+#Merging RNAseq dataset to identify RNA counts
+rnaCounts <- gdcRNAMerge(metadata = metaMatrix.RNA, 
+                         path = rnadir, # the folder in which the data stored
+                         organized = FALSE, # if the data are in separate folders
+                         data.type = 'RNAseq')
+
+#Merging miRNAs dataset for identification of miRNA counts
+mirCounts <- gdcRNAMerge(metadata = metaMatrix.MIR,
+                         path = mirdir, # the folder in which the data stored
+                         organized = FALSE, # if the data are in separate folders
+                         data.type = 'miRNAs')
+
+#Merging clinical dataset for identification of groups.
+clinicalData <- gdcClinicalMerge(path = clinicaldir, key.info = TRUE)
+clinicalData[1:6,5:10]
+
+#Normalization of RNAseq counts data
+rnaExpr <- gdcVoomNormalization(counts = rnaCounts, filter = FALSE)
+
+#Normalization of miRNAs counts data
+mirExpr <- gdcVoomNormalization(counts = mirCounts, filter = FALSE)
+
+#Differential gene expression analysis by using LIMMA
+DEGAll <- gdcDEAnalysis(counts = rnaCounts, 
+                        group = metaMatrix.RNA$sample_type, 
+                        comparison = 'PrimaryTumor-SolidTissueNormal', 
+                        method = 'limma')
+#Dimension of the dataset
+dim(DEGAll)
+
+#Identification of diffrentially expressed RNA
+deALL <- gdcDEReport(deg = DEGAll, gene.type = 'all')
+#Identification of diffrentially expressed noncoding RNA
+deLNC <- gdcDEReport(deg = DEGAll, gene.type = 'long_non_coding')
+#Identification of diffrentially expressed protein coding RNAs (mRNA)
+dePC <- gdcDEReport(deg = DEGAll, gene.type = 'protein_coding')
+
+#Plotting volcano plot for diffrentially expressed RNAs.
+EnhancedVolcano(DEGAll, lab = rownames(DEGAll), x = 'logFC', y = 'FDR', 
+                FCcutoff = 2, pCutoff = 0.05, legendPosition = "right", 
+                col=c('#C0C0C0', '#1E90FF', '#FFD700', '#FF6347'), 
+                legendLabels=c('Not sig.','log2FC','adj.P',
+                               'adj.P & log2FC'), border = 'full', borderWidth = 0.5, 
+                labCol = '#FF6347', selectLab = "NA", 
+                legendLabSize = 10, labSize = 0.00, xlim = c(-4,4), ylim = c(0,50), 
+                title = "TCGA-HNSC RNAs")
+
+#Barplotting the diffrenta types of diffrentially expressed RNAs.
+gdcBarPlot(deg = deALL, angle = 45, data.type = 'RNAseq')
+
+#Heatmap for visualizing the clusters in the integrated data.
+degName = rownames(deALL)
+gdcHeatmap(deg.id = degName, metadata = metaMatrix.RNA, rna.expr = rnaExpr)
+
+#Plotting PCA for mRNA and miRNA datasets  
+pcDat_mRNA <- prcomp(t(rnaCounts))
+pcDat_miR <- prcomp(t(mirCounts))
+autoplot(pcDat_mRNA,
+         data = metaMatrix.RNA, 
+         colour="sample_type", 
+         size=2, main = "PCA for mRNA")
+autoplot(pcDat_miR,
+         data = metaMatrix.MIR, 
+         colour="sample_type", 
+         size=2, main = "PCA for miRNA")
+
+#Network analysis by geometric test, correlation analysis and regulation pattern of non-coding and coding RNA types.
+ceOutput <- gdcCEAnalysis(lnc = rownames(deLNC), 
+                          pc = rownames(dePC), 
+                          lnc.targets = 'starBase', 
+                          pc.targets  = 'starBase', 
+                          rna.expr = rnaExpr, 
+                          mir.expr = mirExpr)
+
+#Looking at the data
+datatable(as.data.frame(ceOutput), 
+          options = list(scrollX = TRUE, pageLength = 5))
+
+#Exporting the RNA regulating data for cytoscape.
+ceOutput2 <- ceOutput[ceOutput$hyperPValue<0.01 & 
+                        ceOutput$corPValue<0.01 & ceOutput$regSim != 0,]
+
+#Exporting nodes and edges for visualizing into cytoscape.
+edges <- gdcExportNetwork(ceNetwork = ceOutput2, net = 'edges')
+nodes <- gdcExportNetwork(ceNetwork = ceOutput2, net = 'nodes')
+
+#Writing files into a local directory. 
+write.table(edges, file='C:/Users/SalamK/Desktop/edges.txt', sep='\t', quote=F)
+write.table(nodes, file='C:/Users/SalamK/Desktop/nodes.txt', sep='\t', quote=F)
+
+#Cox Proportional-Hazards model analysis
+survOutput <- gdcSurvivalAnalysis(gene = rownames(deALL), 
+                                  method = 'coxph', 
+                                  rna.expr = rnaExpr, 
+                                  metadata = metaMatrix.RNA)
+
+#Kaplan-Meier model analysis
+survOutput <- gdcSurvivalAnalysis(gene = rownames(deALL), 
+                                  method = 'KM', 
+                                  rna.expr = rnaExpr, 
+                                  metadata = metaMatrix.RNA, 
+                                  sep = 'median')
+
+#Plotting survival curves for two genes
+gdcKMPlot(gene = 'ENSG00000221968',
+          rna.expr = rnaExpr,
+          metadata = metaMatrix.RNA,
+          sep = 'median')
+
+gdcKMPlot(gene = 'ENSG00000067715',
+          rna.expr = rnaExpr,
+          metadata = metaMatrix.RNA,
+          sep = 'median')
+
+#Plotting survival analysis curve for genes
+shinyKMPlot(gene = rownames(deALL), rna.expr = rnaExpr, 
+            metadata = metaMatrix.RNA)
+
+#Enrichment analysis of the biological terms using gene ontology annotations and plotting.
+enrichOutput <- gdcEnrichAnalysis(gene = rownames(deALL), simplify = TRUE)
+gdcEnrichPlot(enrichOutput, type = 'bar', category = 'GO', num.terms = 10, + xlim(1, 50))
+gdcEnrichPlot(enrichOutput, type='bubble', category='KEGG', num.terms = 10, + xlim(1, 50))
+
+#Associating DEGs with the KEGG pathways.  
+deg <- deALL$logFC
+names(deg) <- rownames(deALL)
+pathways <- as.character(enrichOutput$Terms[enrichOutput$Category=='KEGG'])
+pathways
+
+#Visualizing pathways in the Shiny app
+shinyPathview(deg, pathways = pathways, directory = 'pathview')
